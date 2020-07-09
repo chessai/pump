@@ -29,7 +29,7 @@ writeFs = \case
 
 readFs :: FilePath -> IO FileSystem
 readFs sourceDir = withCurrentDirectory sourceDir $ do
-  lsOutput <- listDirectory "."
+  lsOutput <- filter (/=".git") <$> listDirectory "."
   fs <- fmap concat $ forM lsOutput $ \name -> do
     isFile <- doesFileExist name
     if isFile
