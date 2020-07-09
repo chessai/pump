@@ -1,0 +1,10 @@
+[
+    {
+        "tag": "FetchFromGitHub",
+        "owner": "chshersh",
+        "subPath": null,
+        "package": "profunctors",
+        "repo": "profunctors",
+        "rev": "7bb87f3466b06052fe136cb56fde72671d1338fb"
+    }
+]
