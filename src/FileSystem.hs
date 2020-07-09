@@ -4,6 +4,7 @@
 module FileSystem
   ( FileSystem(..)
   , readFs
+  , readFsFilter
   , writeFs
   ) where
 
@@ -28,8 +29,11 @@ writeFs = \case
     withCurrentDirectory name $ for_ children writeFs
 
 readFs :: FilePath -> IO FileSystem
-readFs sourceDir = withCurrentDirectory sourceDir $ do
-  lsOutput <- listDirectory "."
+readFs = readFsFilter (const True)
+
+readFsFilter :: (FilePath -> Bool) -> FilePath -> IO FileSystem
+readFsFilter p sourceDir = withCurrentDirectory sourceDir $ do
+  lsOutput <- filter p <$> listDirectory "."
   fs <- fmap concat $ forM lsOutput $ \name -> do
     isFile <- doesFileExist name
     if isFile
@@ -40,3 +44,4 @@ readFs sourceDir = withCurrentDirectory sourceDir $ do
         fs <- readFs name
         pure [fs]
   pure (Dir sourceDir fs)
+

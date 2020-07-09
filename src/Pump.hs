@@ -14,6 +14,7 @@
 
 module Pump (main) where
 
+import Control.Concurrent
 import System.Environment
 import FileSystem
 import Conduit
@@ -25,12 +26,12 @@ import Data.Conduit.Zlib (ungzip)
 import Data.List (intercalate)
 import Data.Maybe
 import Distribution.Types.GenericPackageDescription (GenericPackageDescription(..))
-import Distribution.Types.PackageDescription (specVersion)
 import Data.Text (Text)
-import Distribution.Package (PackageName, unPackageName)
+import Distribution.Package (PackageIdentifier(..), PackageName, unPackageName)
 import System.FilePath ((</>), takeExtension)
 import Distribution.Version (Version, versionNumbers, nullVersion, withinRange)
 import GHC.Generics (Generic)
+import qualified Distribution.Types.PackageDescription as PackageDescription
 import Network.HTTP.Client.TLS (getGlobalManager)
 import Network.HTTP.Conduit
 import qualified Distribution.Verbosity as Verbosity
@@ -46,6 +47,7 @@ import qualified Codec.Archive.Tar as Tar
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encode.Pretty as Aeson
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BC8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HMap
 import qualified Data.Scientific as Scientific
@@ -404,38 +406,31 @@ fetchSource = \case
           ++ owner
           ++ "/" ++ repo
     o0@(e0, _, _) <- readProcess $ proc "git" ["clone", gitUrl, srcDir0]
-    liftIO $ print o0
     when (e0 /= ExitSuccess) $ throwError o0
     o1@(e1, _, _) <- liftIO $ withCurrentDirectory srcDir0 $ do
       readProcess $ proc "git" $ ["checkout"] ++
         maybeToList rev
-    liftIO $ print o1
     when (e1 /= ExitSuccess) $ throwError o1
     let srcDir1 = maybe srcDir0 (srcDir0 </>) subPath
-    liftIO $ putStrLn $ "srcDir1 = " ++ srcDir1
     version <- (liftEither =<<) $ liftIO $ withCurrentDirectory srcDir1 $ do
       stuff <- listDirectory "."
-      print stuff
       case List.find (\file -> takeExtension file == ".cabal") stuff of
         Nothing -> pure $ Left (ExitFailure 1, "", "No cabal file found in package")
         Just cabalFile -> do
-          putStrLn =<< getEnv "LC_CTYPE"
           mgpd <- do
-            h <- openFile cabalFile ReadMode
-            hSetEncoding h utf8
-            b <- B.hGetContents h
+            b <- B.readFile cabalFile
             pure $ parseGenericPackageDescriptionMaybe b
 
           pure $ case mgpd of
             Nothing -> Left (ExitFailure 1, "", "Failed to parse cabal file")
-            Just gpd -> Right $ specVersion $ packageDescription gpd
+            Just gpd -> Right $ pkgVersion $ PackageDescription.package $ packageDescription gpd
 
     -- once we have the version, we need to copy everything over
     -- to the new directory
     let srcDir = srcDir1 ++ "-" ++ showVersion version
     -- could be pretty slow. will have to find out.
     liftIO $ do
-      readFs srcDir1 >>= \case
+      readFsFilter (/= ".git") srcDir1 >>= \case
         File {} -> fail "shouldn't happen"
         Dir _ fs -> writeFs $ Dir srcDir fs
     pure (srcDir, version)
@@ -447,7 +442,6 @@ build :: ()
 build _ [] = pure []
 build pkg deps = buildEnv (unPackageName (package pkg)) $ do
   let allPackages = pkg : deps
-  -- smh ignoring the error
   srcDirs <- fmap concat $ forM allPackages $ \src -> do
     e <- fetchSource src
     case e of
@@ -467,41 +461,3 @@ build pkg deps = buildEnv (unPackageName (package pkg)) $ do
     pure $ BuildReport (package p) v e
       (TE.decodeUtf8 (BL.toStrict out))
       (TE.decodeUtf8 (BL.toStrict err))
-
-{-
-build :: ()
-  => PackageName
-  -> Version
-  -> [(PackageName, Version)]
-  -> IO [BuildReport]
-build _ _ [] = pure []
-build name version deps = do
-  buildEnv name version $ do
-    let allPackages = (name, version) : deps
-    forM_ allPackages $ \(n, v) -> do
-      let pkgNameStr = unPackageName n
-      let fullPkgName = pkgNameStr ++ "-" ++ showVersion v
-      let url = "https://hackage.haskell.org/package/"
-            ++ fullPkgName
-            ++ "/"
-            ++ fullPkgName
-            ++ ".tar.gz"
-      let srcDir = fullPkgName
-      fetchGz url (pkgNameStr ++ ".tar") (Just ".") $ \tarFile -> do
-        Tar.extract "." tarFile
-        pure srcDir
-
-    let cabalProj headFile depFile =
-          writeFile "cabal.project"
-          $ unlines
-          $    [ "packages: " ++ headFile ++ "/" ]
-            ++ [ "          " ++ depFile ++ "/" ]
-
-    forM allPackages $ \(n, v) -> do
-      let srcDir = unPackageName n ++ "-" ++ showVersion v
-      cabalProj (unPackageName name ++ "-" ++ showVersion version) srcDir
-      (e, out, err) <- readProcess $ proc "cabal" ["build", srcDir]
-      pure $ BuildReport n v e
-        (TE.decodeUtf8 (BL.toStrict out))
-        (TE.decodeUtf8 (BL.toStrict err))
--}
