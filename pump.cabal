@@ -28,11 +28,15 @@ library
   exposed-modules:
     Pump
   other-modules:
+    FileSystem
     PackDeps
     PackDeps.Types
   build-depends:
     , Cabal >= 3
     , aeson
+    , with-utf8
+    , transformers
+    , mtl
     , scientific
     , typed-process
     , aeson-pretty

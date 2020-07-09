@@ -14,6 +14,8 @@
 
 module Pump (main) where
 
+import System.Environment
+import FileSystem
 import Conduit
 import Control.Applicative (many)
 import Control.Monad
@@ -21,40 +23,53 @@ import Data.Aeson (ToJSON(..), FromJSON(..))
 import Data.Binary (encodeFile, decodeFile)
 import Data.Conduit.Zlib (ungzip)
 import Data.List (intercalate)
-import Data.Maybe (fromMaybe)
+import Data.Maybe
+import Distribution.Types.GenericPackageDescription (GenericPackageDescription(..))
+import Distribution.Types.PackageDescription (specVersion)
 import Data.Text (Text)
 import Distribution.Package (PackageName, unPackageName)
+import System.FilePath ((</>), takeExtension)
 import Distribution.Version (Version, versionNumbers, nullVersion, withinRange)
 import GHC.Generics (Generic)
 import Network.HTTP.Client.TLS (getGlobalManager)
 import Network.HTTP.Conduit
+import qualified Distribution.Verbosity as Verbosity
+import qualified Data.List as List
+import Control.Monad.Except (throwError, liftEither, runExceptT)
+import Distribution.PackageDescription.Parsec (parseGenericPackageDescription, parseGenericPackageDescriptionMaybe, readGenericPackageDescription)
 import PackDeps (Newest(..), PackInfo(..), loadNewestFrom, getReverses)
-import System.Directory (withCurrentDirectory, createDirectoryIfMissing, listDirectory)
+import System.Directory (withCurrentDirectory, listDirectory)
 import System.Exit (ExitCode(..))
 import System.IO.Temp (getCanonicalTemporaryDirectory, withTempDirectory)
 import System.Process.Typed
 import qualified Codec.Archive.Tar as Tar
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encode.Pretty as Aeson
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HMap
 import qualified Data.Scientific as Scientific
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.IO as TIO
 import qualified Options.Applicative as O
+import qualified System.IO.Utf8 as Utf8
+import qualified Data.Text.IO.Utf8 as Utf8
+import System.IO
 
 doCommand :: Command -> IO ()
 doCommand = \case
   DownloadPackageIndex outFile -> do
     downloadPackageIndex outFile
-  GenerateBuildMatrix packageIndex package patches excludedPackages outFile prettify -> do
-    matrix <- generateBuildMatrix packageIndex package patches excludedPackages
+  GenerateBuildMatrix packageIndex package patches excludedPackages outFile prettify overridesPath -> do
+    overrides <- fromMaybe (error "Failed to decode package overrides.") <$> Aeson.decodeFileStrict' @[PackageSource] overridesPath
+    matrix <- generateBuildMatrix packageIndex package patches excludedPackages overrides
     let serialiseToFile = \a -> if prettify
           then BL.writeFile outFile (Aeson.encodePretty a)
           else Aeson.encodeFile outFile a
     serialiseToFile matrix
-  EnactBuildMatrix matrixJson outFile prettify -> do
-    BuildMatrix{ packageSrc = HackageGet p v, .. } <- fromMaybe (error ("failed to decode build matrix from " ++ matrixJson)) <$> Aeson.decodeFileStrict' @BuildMatrix matrixJson
-    buildReport <- build p v (map (\(HackageGet pd vd) -> (pd, vd)) dependencies)
+  RealiseBuildMatrix matrixJson outFile prettify -> do
+    BuildMatrix{..} <- fromMaybe (error ("failed to decode build matrix from " ++ matrixJson)) <$> Aeson.decodeFileStrict' @BuildMatrix matrixJson
+    buildReport <- build packageSrc dependencies
 
     let serialiseToFile = \a -> if prettify
           then BL.writeFile outFile (Aeson.encodePretty a)
@@ -68,13 +83,15 @@ downloadPackageIndex outFile = do
   newest <- loadNewest
   encodeFile outFile newest
 
+-- TODO: filter deprecated packages
 generateBuildMatrix :: ()
   => FilePath
   -> PackageName
   -> Maybe [PatchFile]
   -> [PackageName]
+  -> [PackageSource]
   -> IO BuildMatrix
-generateBuildMatrix packageIndex package patches excludedPackages = do
+generateBuildMatrix packageIndex package patches excludedPackages overrides = do
   newest@(Newest n) <- decodeFile @Newest packageIndex
   let (version, revDeps) = case HMap.lookup package (getReverses newest) of
         Nothing -> (nullVersion, [])
@@ -88,15 +105,26 @@ generateBuildMatrix packageIndex package patches excludedPackages = do
           in (packageVersion, revDeps1)
 
   let matrix = BuildMatrix
-        { packageSrc = HackageGet package version
+        { packageSrc = case findPkg package overrides of
+            Just src -> src
+            Nothing -> HackageGet package version
         , dependencies = flip map revDeps $ \(name, _) ->
-            let PackInfo v _ _ = id
-                  $ fromMaybe (error ("package not found: " ++ unPackageName name))
-                  $ HMap.lookup name n
-            in HackageGet name v
+            case findPkg name overrides of
+              Just src -> src
+              -- we always default to hackage
+              Nothing ->
+                let PackInfo v _ _ = id
+                      $ fromMaybe (error ("package not found: " ++ unPackageName name))
+                      $ HMap.lookup name n
+                in HackageGet name v
         , ..
         }
   pure matrix
+
+findPkg :: PackageName -> [PackageSource] -> Maybe PackageSource
+findPkg name = List.find $ \case
+  HackageGet{..} -> package == name
+  FetchFromGitHub{..} -> package == name
 
 cmdParser :: O.Parser Command
 cmdParser = O.subparser
@@ -163,8 +191,15 @@ cmdParser = O.subparser
               , O.help "prettify output"
               ]
           )
+      <*> ( O.strOption
+            $ mconcat
+            $ [ O.long "overrides"
+              , O.help "source overrides"
+              , O.metavar "FILEPATH"
+              ]
+          )
 
-    realise = EnactBuildMatrix
+    realise = RealiseBuildMatrix
       <$> ( O.strOption
             $ mconcat
             $ [ O.long "matrix"
@@ -203,20 +238,21 @@ data Command
     --
     --   download the package index and serialise it to
     --   @targetFile@ as binary
-  | GenerateBuildMatrix FilePath PackageName (Maybe [PatchFile]) [PackageName] FilePath Bool
-    -- ^ (packageIndex, package, patches, excludedPackages, output, prettifyOutput)
+  | GenerateBuildMatrix FilePath PackageName (Maybe [PatchFile]) [PackageName] FilePath Bool FilePath
+    -- ^ (packageIndex, package, patches, excludedPackages, output, prettifyOutput, overrides)
     --
     --   construct a build matrix of the reverse dependencies
     --   of @package@ (excluding @excludedPackages@), from
     --   @packageIndex@, applying @patches@ to the source of
-    --   @package@, if any.
+    --   @package@, if any. @overrides@ will be applied to
+    --   the reverse dependencies.
     --
     --   serialise the build matrix to @output@, prettifying it
     --   if @prettifyOutput@ is set.
-  | EnactBuildMatrix FilePath FilePath Bool
+  | RealiseBuildMatrix FilePath FilePath Bool
     -- ^ (matrixJson, output, prettifyOutput)
     --
-    --   Run the build matrix described by @matrixJson@,
+    --   run the build matrix described by @matrixJson@,
     --   and dump the build report to @output@, prettifying it
     --   if @prettifyOutput@ is set.
     --
@@ -234,12 +270,13 @@ data PackageSource
       { package :: PackageName
       , version :: Version
       }
---  | FetchFromGitHub
---      { owner :: Text
---      , repo :: Text
---      , revision :: Text
---      , subPath :: FilePath
---      }
+  | FetchFromGitHub
+      { package :: PackageName
+      , owner :: String
+      , repo :: String
+      , rev :: Maybe String
+      , subPath :: Maybe FilePath
+      }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
@@ -253,6 +290,33 @@ main = do
     $ [ O.fullDesc
       ]
   doCommand cmd
+
+{-
+  BL.writeFile "overrides.json" $ Aeson.encodePretty
+    [
+      FetchFromGitHub
+        { package = "fib"
+        , owner = "chessai"
+        , repo = "fib"
+        , rev = Nothing
+        , subPath = Nothing
+        }
+    , FetchFromGitHub
+        { package = "coya"
+        , owner = "chessai"
+        , repo = "coya"
+        , rev = Nothing
+        , subPath = Nothing
+        }
+    , FetchFromGitHub
+        { package = "ring-buffers"
+        , owner = "chessai"
+        , repo = "ring-buffers"
+        , rev = Nothing
+        , subPath = Nothing
+        }
+    ]
+-}
 
 loadNewest :: IO Newest
 loadNewest = do
@@ -308,6 +372,103 @@ data BuildReport = BuildReport
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
+buildEnv :: String -> IO a -> IO a
+buildEnv envSuffix act = do
+  tmpDir <- getCanonicalTemporaryDirectory
+  let template = "pump-the-brakes-" ++ envSuffix
+  withTempDirectory tmpDir template $ \dir -> do
+    withCurrentDirectory dir act
+
+fetchSource :: ()
+  => PackageSource
+  -> IO ( Either
+            (ExitCode, BL.ByteString, BL.ByteString)
+            (FilePath, Version)
+        )
+fetchSource = \case
+  HackageGet{..} -> do
+    let pkgNameStr = unPackageName package
+    let fullPkgName = pkgNameStr ++ "-" ++ showVersion version
+    let url = "https://hackage.haskell.org/package/"
+          ++ fullPkgName
+          ++ "/"
+          ++ fullPkgName
+          ++ ".tar.gz"
+    let srcDir = fullPkgName
+    fetchGz url (pkgNameStr ++ ".tar") (Just ".") $ \tarFile -> do
+      Tar.extract "." tarFile
+      pure $ Right (srcDir, version)
+  FetchFromGitHub{..} -> runExceptT $ do
+    let srcDir0 = unPackageName package
+    let gitUrl = "https://github.com/"
+          ++ owner
+          ++ "/" ++ repo
+    o0@(e0, _, _) <- readProcess $ proc "git" ["clone", gitUrl, srcDir0]
+    liftIO $ print o0
+    when (e0 /= ExitSuccess) $ throwError o0
+    o1@(e1, _, _) <- liftIO $ withCurrentDirectory srcDir0 $ do
+      readProcess $ proc "git" $ ["checkout"] ++
+        maybeToList rev
+    liftIO $ print o1
+    when (e1 /= ExitSuccess) $ throwError o1
+    let srcDir1 = maybe srcDir0 (srcDir0 </>) subPath
+    liftIO $ putStrLn $ "srcDir1 = " ++ srcDir1
+    version <- (liftEither =<<) $ liftIO $ withCurrentDirectory srcDir1 $ do
+      stuff <- listDirectory "."
+      print stuff
+      case List.find (\file -> takeExtension file == ".cabal") stuff of
+        Nothing -> pure $ Left (ExitFailure 1, "", "No cabal file found in package")
+        Just cabalFile -> do
+          putStrLn =<< getEnv "LC_CTYPE"
+          mgpd <- do
+            h <- openFile cabalFile ReadMode
+            hSetEncoding h utf8
+            b <- B.hGetContents h
+            pure $ parseGenericPackageDescriptionMaybe b
+
+          pure $ case mgpd of
+            Nothing -> Left (ExitFailure 1, "", "Failed to parse cabal file")
+            Just gpd -> Right $ specVersion $ packageDescription gpd
+
+    -- once we have the version, we need to copy everything over
+    -- to the new directory
+    let srcDir = srcDir1 ++ "-" ++ showVersion version
+    -- could be pretty slow. will have to find out.
+    liftIO $ do
+      readFs srcDir1 >>= \case
+        File {} -> fail "shouldn't happen"
+        Dir _ fs -> writeFs $ Dir srcDir fs
+    pure (srcDir, version)
+
+build :: ()
+  => PackageSource
+  -> [PackageSource]
+  -> IO [BuildReport]
+build _ [] = pure []
+build pkg deps = buildEnv (unPackageName (package pkg)) $ do
+  let allPackages = pkg : deps
+  -- smh ignoring the error
+  srcDirs <- fmap concat $ forM allPackages $ \src -> do
+    e <- fetchSource src
+    case e of
+      Left err -> print err *> pure []
+      Right x -> pure [x]
+
+  let cabalProj depFile = do
+        writeFile "cabal.project"
+        $ unlines
+        $    [ "packages: " ++ fst (head srcDirs) ++ "/" ]
+          ++ [ "          " ++ depFile            ++ "/" ]
+
+  forM (zip allPackages srcDirs) $ \(p, (srcDir, v)) -> do
+    cabalProj srcDir
+    putStrLn $ "Building " ++ srcDir ++ "..."
+    (e, out, err) <- readProcess $ proc "cabal" ["v2-build", srcDir]
+    pure $ BuildReport (package p) v e
+      (TE.decodeUtf8 (BL.toStrict out))
+      (TE.decodeUtf8 (BL.toStrict err))
+
+{-
 build :: ()
   => PackageName
   -> Version
@@ -315,34 +476,32 @@ build :: ()
   -> IO [BuildReport]
 build _ _ [] = pure []
 build name version deps = do
-  tmpDir <- getCanonicalTemporaryDirectory
-  let template = "pump-the-brakes-" ++ unPackageName name
-  let allPackages = (name, version) : deps
-  withTempDirectory tmpDir template $ \dir -> do
-    withCurrentDirectory dir $ do
-      forM_ allPackages $ \(n, v) -> do
-        let pkgNameStr = unPackageName n
-        let fullPkgName = pkgNameStr ++ "-" ++ showVersion v
-        let url = "https://hackage.haskell.org/package/"
-              ++ fullPkgName
-              ++ "/"
-              ++ fullPkgName
-              ++ ".tar.gz"
-        let srcDir = fullPkgName
-        fetchGz url (pkgNameStr ++ ".tar") (Just ".") $ \tarFile -> do
-          Tar.extract "." tarFile
-          pure srcDir
+  buildEnv name version $ do
+    let allPackages = (name, version) : deps
+    forM_ allPackages $ \(n, v) -> do
+      let pkgNameStr = unPackageName n
+      let fullPkgName = pkgNameStr ++ "-" ++ showVersion v
+      let url = "https://hackage.haskell.org/package/"
+            ++ fullPkgName
+            ++ "/"
+            ++ fullPkgName
+            ++ ".tar.gz"
+      let srcDir = fullPkgName
+      fetchGz url (pkgNameStr ++ ".tar") (Just ".") $ \tarFile -> do
+        Tar.extract "." tarFile
+        pure srcDir
 
-      let cabalProj headFile depFile =
-            writeFile "cabal.project"
-            $ unlines
-            $    [ "packages: " ++ headFile ++ "/" ]
-              ++ [ "          " ++ depFile ++ "/" ]
+    let cabalProj headFile depFile =
+          writeFile "cabal.project"
+          $ unlines
+          $    [ "packages: " ++ headFile ++ "/" ]
+            ++ [ "          " ++ depFile ++ "/" ]
 
-      forM allPackages $ \(n, v) -> do
-        let srcDir = unPackageName n ++ "-" ++ showVersion v
-        cabalProj (unPackageName name ++ "-" ++ showVersion version) srcDir
-        (e, out, err) <- readProcess $ proc "cabal" ["build", srcDir]
-        pure $ BuildReport n v e
-          (TE.decodeUtf8 (BL.toStrict out))
-          (TE.decodeUtf8 (BL.toStrict err))
+    forM allPackages $ \(n, v) -> do
+      let srcDir = unPackageName n ++ "-" ++ showVersion v
+      cabalProj (unPackageName name ++ "-" ++ showVersion version) srcDir
+      (e, out, err) <- readProcess $ proc "cabal" ["build", srcDir]
+      pure $ BuildReport n v e
+        (TE.decodeUtf8 (BL.toStrict out))
+        (TE.decodeUtf8 (BL.toStrict err))
+-}

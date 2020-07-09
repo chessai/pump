@@ -1,11 +1,18 @@
+{-# language DerivingStrategies #-}
+{-# language LambdaCase #-}
+
 module FileSystem
-  (
+  ( FileSystem(..)
+  , readFs
+  , writeFs
   ) where
 
 import Control.Monad
 import Data.Foldable (for_)
+import Data.Text (Text)
 import System.Directory (createDirectoryIfMissing, withCurrentDirectory, listDirectory, doesFileExist)
-import System.IO.Temp (getCanonicalTemporaryDirectory, withTempDirectory)
+
+import qualified Data.Text.IO as TIO
 
 data FileSystem
   = File FilePath Text
