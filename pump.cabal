@@ -33,6 +33,9 @@ library
   build-depends:
     , Cabal >= 3
     , aeson
+    , scientific
+    , typed-process
+    , aeson-pretty
     , base >= 4.11 && < 5
     , binary
     , binary-instances
@@ -69,3 +72,5 @@ executable pump
     app
   default-language:
     Haskell2010
+  ghc-options:
+    -threaded
