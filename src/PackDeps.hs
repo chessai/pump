@@ -4,8 +4,9 @@
 {-# language ViewPatterns #-}
 
 module PackDeps
-    ( Newest
+    ( Newest(..)
     , Reverses
+    , PackInfo(..)
 
     , loadNewestFrom
     , getReverses
@@ -105,50 +106,6 @@ unionsWith :: (Foldable f, Hashable k, Eq k)
   -> f (HashMap k v)
   -> HashMap k v
 unionsWith f = foldl' (HMap.unionWith f) HMap.empty
-
---isDeprecated ::
-{-
-maxVersion :: Ord v => PackInfo n v l -> PackInfo n v l -> PackInfo n v l
-maxVersion pi1 pi2 = if piVersion pi1 <= piVersion pi2 then pi2 else pi1
-
-getReverses :: Newest -> Reverses
-getReverses (Newest newest) =
-    HMap.fromList withVersion
-  where
-    -- dep = dependency, rel = relying package
-    --toTuples :: (PackageName, PackInfo) -> HMap.HashMap PackageName (HMap.HashMap PackageName VersionRange)
-    toTuples (_, PackInfo { piDesc = Nothing' }) = HMap.empty
-    toTuples (rel, PackInfo { piDesc = Just' desc@DescInfo { diDeps = deps } })
-        -- | isDeprecated desc = HMap.empty
-        | otherwise = combine $ map (toTuple rel) $ HMap.toList deps
-
-    combine = unionsWith HMap.union
-
-    toTuple rel (dep, PUVersionRange _ range) =
-        if rel == dep
-            then HMap.empty
-            else HMap.singleton dep $ HMap.singleton rel range
-
-    hoisted :: HMap.HashMap PackageName (HMap.HashMap PackageName (VersionRange Version))
-    hoisted = combine $ map toTuples $ HMap.toList newest
-
-    withVersion = mapMaybe addVersion $ HMap.toList hoisted
-
-    addVersion (dep, rels) =
-        case HMap.lookup dep newest of
-            Nothing -> Nothing
-            Just PackInfo { piVersion = v} -> Just (dep, (v, rels))
-
-getDescInfo :: GenericPackageDescription -> (DescInfo PackageName Version, License)
-getDescInfo gpd = (DescInfo
-    { diHaystack = toCaseFold $ pack $ unlines [author p, maintainer p, name]
-    , diDeps = getDeps gpd
-    , diSynopsis = pack $ synopsis p
-    }, License $ pack $ prettyShow $ license $ packageDescription gpd)
-  where
-    p = packageDescription gpd
-    PackageIdentifier (D.unPackageName -> name) _version = package p
--}
 
 getDeps :: L.ByteString -> Maybe (HashMap PackageName PUVersionRange)
 getDeps lbs = do

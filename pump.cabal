@@ -32,32 +32,25 @@ library
     PackDeps.Types
   build-depends:
     , Cabal >= 3
+    , aeson
     , base >= 4.11 && < 5
     , binary
+    , binary-instances
     , bytestring
-    , classy-prelude-conduit
-    , compact
     , conduit
     , conduit-extra
     , containers
     , directory
     , filepath
     , hashable
-    , http-client
     , http-client-tls
     , http-conduit
-    , http-types
-    , lens
-    , mtl
-    , packdeps
+    , optparse-applicative
     , split
     , tar
     , temporary
     , text
-    , time
-    , transformers
     , unordered-containers
-    , vector
   hs-source-dirs:
     src
   default-language:

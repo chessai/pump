@@ -1,9 +1,0 @@
-packages: .
-
-source-repository-package
-  type: git
-  location: https://github.com/snoyberg/packdeps
-  tag: 921f2dd8c094507d6c67b0a69057f1ad26170d2a
-  subdir: packdeps-cli
-
-allow-newer: packdeps:optparse-applicative
