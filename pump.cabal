@@ -34,7 +34,6 @@ library
   build-depends:
     , Cabal >= 3
     , aeson
-    , with-utf8
     , transformers
     , mtl
     , scientific
