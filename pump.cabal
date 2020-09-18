@@ -29,6 +29,7 @@ library
     Pump
   other-modules:
     Commands
+    Fetch
     FileSystem
     PackDeps
     PackDeps.Types
@@ -36,10 +37,6 @@ library
   build-depends:
     , Cabal >= 3
     , aeson
-    , transformers
-    , mtl
-    , scientific
-    , typed-process
     , aeson-pretty
     , base >= 4.11 && < 5
     , binary
@@ -53,11 +50,19 @@ library
     , hashable
     , http-client-tls
     , http-conduit
+    , mtl
     , optparse-applicative
+    , resourcet
+    , scientific
     , split
+    , streaming
+    , streaming-bytestring
+    , string-conversions
     , tar
     , temporary
     , text
+    , transformers
+    , typed-process
     , unordered-containers
   hs-source-dirs:
     src

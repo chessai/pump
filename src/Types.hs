@@ -3,6 +3,7 @@
 {-# language DerivingStrategies #-}
 {-# language DuplicateRecordFields #-}
 {-# language LambdaCase #-}
+{-# language RecordWildCards #-}
 {-# language TypeApplications #-}
 
 {-# options_ghc -fno-warn-orphans #-}
@@ -13,6 +14,9 @@ module Types
   , PatchFile
   , BuildReport(..)
   , Phase(..)
+
+  , sourcePackage
+  , sourceVersion
   ) where
 
 import Data.Aeson (ToJSON(..), FromJSON(..))
@@ -48,15 +52,25 @@ data PackageSource
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
+sourcePackage :: PackageSource -> PackageName
+sourcePackage = \case
+  HackageGet{..} -> package
+  FetchFromGitHub{..} -> package
+
+sourceVersion :: PackageSource -> Maybe Version
+sourceVersion = \case
+  HackageGet{..} -> Just version
+  FetchFromGitHub{} -> Nothing
+
 type PatchFile = FilePath
 
-data Phase = Building | Testing
+data Phase = Fetching | Building | Testing
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
 data BuildReport = BuildReport
   { pkg :: PackageName
-  , version :: Version
+  , version :: Maybe Version
   , phase :: Phase
   , exitCode :: ExitCode
   , stdout :: Text
