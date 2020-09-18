@@ -66,10 +66,10 @@ doCommand = \case
         <$> Aeson.decodeFileStrict' @[PackageSource] path
     matrix <- generateBuildMatrix packageIndex package patches excludedPackages overrides
     serialiseToFile Pretty outFile matrix
-  RealiseBuildMatrix matrixJson outFile -> do
+  RealiseBuildMatrix dontCheck matrixJson outFile -> do
     BuildMatrix{..} <- fromMaybe (error ("failed to decode build matrix from " ++ matrixJson))
                        <$> Aeson.decodeFileStrict' @BuildMatrix matrixJson
-    buildReport <- build packageSrc dependencies
+    buildReport <- build dontCheck packageSrc dependencies
     serialiseToFile Pretty outFile buildReport
   Top packageIndex package n -> do
     tops <- topDependencies packageIndex package n
@@ -263,7 +263,13 @@ cmdParser = O.subparser
       <*> overrides
 
     realise = RealiseBuildMatrix
-      <$> ( O.strOption
+      <$> ( O.switch
+              $ mconcat
+              $ [ O.long "dontCheck"
+                , O.help "whether or not to run tests"
+                ]
+          )
+      <*> ( O.strOption
             $ mconcat
             $ [ O.long "matrix"
               , O.short 'm'
@@ -385,12 +391,14 @@ data Command
     --   the reverse dependencies.
     --
     --   serialise the build matrix to @output@.
-  | RealiseBuildMatrix FilePath FilePath
-    -- ^ (matrixJson, output)
+  | RealiseBuildMatrix Bool FilePath FilePath
+    -- ^ (dontCheck, matrixJson, output)
     --
     --   run the build matrix described by @matrixJson@,
     --   and dump the build report to @output@.
     --
+    --   @dontCheck@ determines whether or not to run tests.
+    --   by default, it is 'False'.
   | Top FilePath PackageName Int
     -- ^ (packageIndex, package, n)
     --
@@ -512,9 +520,14 @@ instance FromJSON ExitCode where
     Just 0 -> pure ExitSuccess
     Just n -> pure (ExitFailure n)
 
+data Phase = Building | Testing
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
+
 data BuildReport = BuildReport
   { pkg :: PackageName
   , version :: Version
+  , phase :: Phase
   , exitCode :: ExitCode
   , stdout :: Text
   , stderr :: Text
@@ -585,11 +598,12 @@ fetchSource = \case
     pure (srcDir, version)
 
 build :: ()
-  => PackageSource
+  => Bool
+  -> PackageSource
   -> [PackageSource]
   -> IO [BuildReport]
-build _ [] = pure []
-build pkg deps = buildEnv (unPackageName (package pkg)) $ do
+build _ _ [] = pure []
+build dontCheck pkg deps = buildEnv (unPackageName (package pkg)) $ do
   let allPackages = pkg : deps
   srcDirs <- fmap concat $ forM allPackages $ \src -> do
     e <- fetchSource src
@@ -603,10 +617,17 @@ build pkg deps = buildEnv (unPackageName (package pkg)) $ do
         $    [ "packages: " ++ fst (head srcDirs) ++ "/" ]
           ++ [ "          " ++ depFile            ++ "/" ]
 
-  forM (zip allPackages srcDirs) $ \(p, (srcDir, v)) -> do
+  fmap List.concat $ forM (zip allPackages srcDirs) $ \(p, (srcDir, v)) -> do
     cabalProj srcDir
     putStrLn $ "Building " ++ srcDir ++ "..."
-    (e, out, err) <- readProcess $ proc "cabal" ["v2-build", srcDir]
-    pure $ BuildReport (package p) v e
-      (TE.decodeUtf8 (BL.toStrict out))
-      (TE.decodeUtf8 (BL.toStrict err))
+    buildReport <- do
+      (e, out, err) <- readProcess $ proc "cabal" ["v2-build", srcDir]
+      pure $ BuildReport (package p) v Building e
+        (TE.decodeUtf8 (BL.toStrict out))
+        (TE.decodeUtf8 (BL.toStrict err))
+    testReport <- if dontCheck then pure [] else fmap (:[]) $ do
+      (e, out, err) <- readProcess $ proc "cabal" ["v2-test", srcDir]
+      pure $ BuildReport (package p) v Testing e
+        (TE.decodeUtf8 (BL.toStrict out))
+        (TE.decodeUtf8 (BL.toStrict err))
+    pure (buildReport : testReport)
