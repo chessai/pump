@@ -10,13 +10,14 @@
 {-# language ScopedTypeVariables #-}
 {-# language TupleSections #-}
 {-# language TypeApplications #-}
+{-# language ViewPatterns #-}
 
 {-# options_ghc -fno-warn-orphans #-}
 
 module Pump (main) where
 
 import Conduit
-import Control.Applicative (many)
+import Control.Applicative ((<|>), many)
 import Control.Monad
 import Control.Monad.Except (throwError, liftEither, runExceptT)
 import Data.Aeson (ToJSON(..), FromJSON(..))
@@ -57,8 +58,12 @@ doCommand = \case
   DownloadPackageIndex outFile -> do
     downloadPackageIndex outFile
   GenerateBuildMatrix packageIndex package patches excludedPackages outFile overridesPath -> do
-    overrides <- fromMaybe (error "Failed to decode package overrides.")
-                 <$> Aeson.decodeFileStrict' @[PackageSource] overridesPath
+    overrides <- case overridesPath of
+      Nothing -> do
+        pure []
+      Just path -> do
+        fromMaybe (error "Failed to decode package overrides.")
+        <$> Aeson.decodeFileStrict' @[PackageSource] path
     matrix <- generateBuildMatrix packageIndex package patches excludedPackages overrides
     serialiseToFile Pretty outFile matrix
   RealiseBuildMatrix matrixJson outFile -> do
@@ -69,6 +74,15 @@ doCommand = \case
   Top packageIndex package n -> do
     tops <- topDependencies packageIndex package n
     forM_ tops (putStrLn . unPackageName)
+  GenerateBuildMatrixFromTop packageIndex package patches excludedPackages outFile overridesPath n -> do
+    overrides <- case overridesPath of
+      Nothing -> do
+        pure []
+      Just path -> do
+        fromMaybe (error "Failed to decode package overrides.")
+        <$> Aeson.decodeFileStrict' @[PackageSource] path
+    matrix <- generateBuildMatrixFromTop packageIndex package patches excludedPackages overrides n
+    serialiseToFile Pretty outFile matrix
 
 data Prettyness = Pretty | NotPretty
 
@@ -143,6 +157,34 @@ topDependencies packageIndex package n = do
            )
        $ directDeps
 
+-- TODO: filter deprecated packages
+generateBuildMatrixFromTop :: ()
+  => FilePath
+  -> PackageName
+  -> Maybe [PatchFile]
+  -> [PackageName]
+  -> [PackageSource]
+  -> Int
+  -> IO BuildMatrix
+generateBuildMatrixFromTop packageIndex package patches excludedPackages overrides n = do
+  newest <- decodeFile @Newest packageIndex
+  let version = maybe nullVersion fst $ HMap.lookup package (getReverses newest)
+  topNReverseDependencies <- filter (\p -> not (p `elem` excludedPackages)) <$> topDependencies packageIndex package n
+  pure $ BuildMatrix
+    { packageSrc = case findPkg package overrides of
+        Just src -> src
+        Nothing -> HackageGet package version
+    , dependencies = flip map topNReverseDependencies $ \name ->
+        case findPkg name overrides of
+          Just src -> src
+          Nothing ->
+            let PackInfo v _ _ = id
+                  $ fromMaybe (error ("package not found: " ++ unPackageName name))
+                  $ HMap.lookup name (getNewest newest)
+            in HackageGet name v
+    , ..
+    }
+
 directDependencies :: PackageName -> Reverses -> [PackageName]
 directDependencies package reverses = id
   $ HMap.keys
@@ -163,12 +205,14 @@ cmdParser = O.subparser
     , O.command "realise" (O.info (O.helper <*> realise) realiseInfo)
     , O.command "realize" (O.info (O.helper <*> realise) realiseInfo)
     , O.command "top" (O.info (O.helper <*> top) topInfo)
+    , O.command "top-matrix" (O.info (O.helper <*> topMatrix) topMatrixInfo)
     ]
   where
     downloadInfo = O.fullDesc
     matrixInfo = O.fullDesc
     realiseInfo = O.fullDesc
     topInfo = O.fullDesc
+    topMatrixInfo = O.fullDesc
 
     download = DownloadPackageIndex
       <$> ( O.strOption
@@ -216,13 +260,7 @@ cmdParser = O.subparser
               , O.metavar "FILEPATH"
               ]
           )
-      <*> ( O.strOption
-            $ mconcat
-            $ [ O.long "overrides"
-              , O.help "source overrides"
-              , O.metavar "FILEPATH"
-              ]
-          )
+      <*> overrides
 
     realise = RealiseBuildMatrix
       <$> ( O.strOption
@@ -267,7 +305,62 @@ cmdParser = O.subparser
               ]
           )
 
-    patches = fmap (\case { [] -> Nothing; xs -> Just xs; })
+    topMatrix = GenerateBuildMatrixFromTop
+      <$> ( O.strOption
+            $ mconcat
+            $ [ O.long "index"
+              , O.short 'i'
+              , O.help "location of package index"
+              , O.metavar "FILEPATH"
+              ]
+          )
+      <*> ( O.strOption
+            $ mconcat
+            $ [ O.long "pkg"
+              , O.short 'p'
+              , O.help "name of package"
+              , O.metavar "PACKAGE NAME"
+              ]
+          )
+      <*> patches
+      <*> ( many
+              ( O.strOption
+                $ mconcat
+                $ [ O.long "exclude"
+                  , O.short 'e'
+                  , O.help "exclude the package from the output"
+                  , O.metavar "PACKAGE NAME"
+                  ]
+              )
+          )
+      <*> ( O.strOption
+            $ mconcat
+            $ [ O.long "target"
+              , O.short 'o'
+              , O.help "where to dump serialised build matrix"
+              , O.metavar "FILEPATH"
+              ]
+          )
+      <*> overrides
+      <*> ( O.option O.auto
+            $ mconcat
+            $ [ O.short 'n'
+              , O.help "top N most depended on immediate reverse dependencies"
+              , O.metavar "INT"
+              ]
+          )
+
+    overrides = pure Nothing
+      <|> ( fmap Just
+            $ O.strOption
+            $ mconcat
+            $ [ O.long "overrides"
+              , O.help "source overrides"
+              , O.metavar "FILEPATH"
+              ]
+          )
+    patches = id
+      $ fmap (\case { [] -> Nothing; xs -> Just xs; })
       $ many
       $ O.strOption
       $ mconcat
@@ -282,7 +375,7 @@ data Command
     --
     --   download the package index and serialise it to
     --   @targetFile@ as binary
-  | GenerateBuildMatrix FilePath PackageName (Maybe [PatchFile]) [PackageName] FilePath FilePath
+  | GenerateBuildMatrix FilePath PackageName (Maybe [PatchFile]) [PackageName] FilePath (Maybe FilePath)
     -- ^ (packageIndex, package, patches, excludedPackages, output, overrides)
     --
     --   construct a build matrix of the reverse dependencies
@@ -301,8 +394,18 @@ data Command
   | Top FilePath PackageName Int
     -- ^ (packageIndex, package, n)
     --
-    --   Return a list of the top N most depended on immediate reverse
-    --   dependencies of the package.
+    --   Return a list of the top N most depended on
+    --   immediate reverse dependencies of the package.
+  | GenerateBuildMatrixFromTop FilePath PackageName (Maybe [PatchFile]) [PackageName] FilePath (Maybe FilePath) Int
+    -- ^ (packageIndex, package, patches, excludedPackages, output, overrides, n)
+    --
+    --   construct a build matrix consisting of the top N most
+    --   depended on reverse dependencies of @package@ (excluding @excludedPackages@),
+    --   from @packageIndex@, applying @patches@ to the source of
+    --   @package@, if any. @overrides@ will be applied to
+    --   the reverse dependencies.
+    --
+    --   serialise the build matrix to @output@.
 
 data BuildMatrix = BuildMatrix
   { packageSrc :: PackageSource

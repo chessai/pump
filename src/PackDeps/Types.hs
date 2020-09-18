@@ -55,7 +55,7 @@ instance ToJSON PackageName where
 instance FromJSON PackageName where
   parseJSON = fmap mkPackageName . parseJSON
 
-newtype Newest = Newest (HashMap PackageName PackInfo)
+newtype Newest = Newest { getNewest :: HashMap PackageName PackInfo }
   deriving stock (Show)
   deriving newtype (Eq, Binary)
 
