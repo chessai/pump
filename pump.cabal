@@ -28,9 +28,11 @@ library
   exposed-modules:
     Pump
   other-modules:
+    Commands
     FileSystem
     PackDeps
     PackDeps.Types
+    Types
   build-depends:
     , Cabal >= 3
     , aeson
