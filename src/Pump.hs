@@ -1,18 +1,8 @@
-{-# language DeriveAnyClass #-}
-{-# language DeriveGeneric #-}
-{-# language DerivingStrategies #-}
-{-# language DuplicateRecordFields #-}
 {-# language LambdaCase #-}
 {-# language NumericUnderscores #-}
 {-# language OverloadedStrings #-}
-{-# language PackageImports #-}
 {-# language RecordWildCards #-}
-{-# language ScopedTypeVariables #-}
-{-# language TupleSections #-}
 {-# language TypeApplications #-}
-{-# language ViewPatterns #-}
-
-{-# options_ghc -fno-warn-orphans #-}
 
 module Pump (main) where
 
