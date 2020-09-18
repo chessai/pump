@@ -8,75 +8,74 @@
 {-# language PackageImports #-}
 {-# language RecordWildCards #-}
 {-# language ScopedTypeVariables #-}
+{-# language TupleSections #-}
 {-# language TypeApplications #-}
 
 {-# options_ghc -fno-warn-orphans #-}
 
 module Pump (main) where
 
-import Control.Concurrent
-import System.Environment
-import FileSystem
 import Conduit
 import Control.Applicative (many)
 import Control.Monad
+import Control.Monad.Except (throwError, liftEither, runExceptT)
 import Data.Aeson (ToJSON(..), FromJSON(..))
 import Data.Binary (encodeFile, decodeFile)
 import Data.Conduit.Zlib (ungzip)
 import Data.List (intercalate)
 import Data.Maybe
-import Distribution.Types.GenericPackageDescription (GenericPackageDescription(..))
+import Data.Ord (Down(..))
 import Data.Text (Text)
 import Distribution.Package (PackageIdentifier(..), PackageName, unPackageName)
-import System.FilePath ((</>), takeExtension)
+import Distribution.PackageDescription.Parsec (parseGenericPackageDescriptionMaybe)
+import Distribution.Types.GenericPackageDescription (GenericPackageDescription(..))
 import Distribution.Version (Version, versionNumbers, nullVersion, withinRange)
+import FileSystem
 import GHC.Generics (Generic)
-import qualified Distribution.Types.PackageDescription as PackageDescription
 import Network.HTTP.Client.TLS (getGlobalManager)
 import Network.HTTP.Conduit
-import qualified Distribution.Verbosity as Verbosity
-import qualified Data.List as List
-import Control.Monad.Except (throwError, liftEither, runExceptT)
-import Distribution.PackageDescription.Parsec (parseGenericPackageDescription, parseGenericPackageDescriptionMaybe, readGenericPackageDescription)
-import PackDeps (Newest(..), PackInfo(..), loadNewestFrom, getReverses)
+import PackDeps (Newest(..), PackInfo(..), Reverses, loadNewestFrom, getReverses)
 import System.Directory (withCurrentDirectory, listDirectory)
 import System.Exit (ExitCode(..))
+import System.FilePath ((</>), takeExtension)
 import System.IO.Temp (getCanonicalTemporaryDirectory, withTempDirectory)
 import System.Process.Typed
 import qualified Codec.Archive.Tar as Tar
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encode.Pretty as Aeson
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Char8 as BC8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HMap
+import qualified Data.List as List
 import qualified Data.Scientific as Scientific
 import qualified Data.Text.Encoding as TE
-import qualified Data.Text.IO as TIO
+import qualified Distribution.Types.PackageDescription as PackageDescription
 import qualified Options.Applicative as O
-import qualified System.IO.Utf8 as Utf8
-import qualified Data.Text.IO.Utf8 as Utf8
-import System.IO
 
 doCommand :: Command -> IO ()
 doCommand = \case
   DownloadPackageIndex outFile -> do
     downloadPackageIndex outFile
-  GenerateBuildMatrix packageIndex package patches excludedPackages outFile prettify overridesPath -> do
-    overrides <- fromMaybe (error "Failed to decode package overrides.") <$> Aeson.decodeFileStrict' @[PackageSource] overridesPath
+  GenerateBuildMatrix packageIndex package patches excludedPackages outFile overridesPath -> do
+    overrides <- fromMaybe (error "Failed to decode package overrides.")
+                 <$> Aeson.decodeFileStrict' @[PackageSource] overridesPath
     matrix <- generateBuildMatrix packageIndex package patches excludedPackages overrides
-    let serialiseToFile = \a -> if prettify
-          then BL.writeFile outFile (Aeson.encodePretty a)
-          else Aeson.encodeFile outFile a
-    serialiseToFile matrix
-  RealiseBuildMatrix matrixJson outFile prettify -> do
-    BuildMatrix{..} <- fromMaybe (error ("failed to decode build matrix from " ++ matrixJson)) <$> Aeson.decodeFileStrict' @BuildMatrix matrixJson
+    serialiseToFile Pretty outFile matrix
+  RealiseBuildMatrix matrixJson outFile -> do
+    BuildMatrix{..} <- fromMaybe (error ("failed to decode build matrix from " ++ matrixJson))
+                       <$> Aeson.decodeFileStrict' @BuildMatrix matrixJson
     buildReport <- build packageSrc dependencies
+    serialiseToFile Pretty outFile buildReport
+  Top packageIndex package n -> do
+    tops <- topDependencies packageIndex package n
+    forM_ tops (putStrLn . unPackageName)
 
-    let serialiseToFile = \a -> if prettify
-          then BL.writeFile outFile (Aeson.encodePretty a)
-          else Aeson.encodeFile outFile a
-    serialiseToFile buildReport
+data Prettyness = Pretty | NotPretty
+
+serialiseToFile :: ToJSON a => Prettyness -> FilePath -> a -> IO ()
+serialiseToFile p path a = case p of
+  Pretty -> BL.writeFile path (Aeson.encodePretty a)
+  NotPretty -> Aeson.encodeFile path a
 
 downloadPackageIndex :: ()
   => FilePath
@@ -123,6 +122,34 @@ generateBuildMatrix packageIndex package patches excludedPackages overrides = do
         }
   pure matrix
 
+topDependencies :: ()
+  => FilePath
+  -> PackageName
+  -> Int
+  -> IO [PackageName]
+topDependencies packageIndex package n = do
+  newest <- decodeFile @Newest packageIndex
+  let reverses = getReverses newest
+  let directDeps :: [PackageName]
+      directDeps = directDependencies package reverses
+  pure $ id
+       $ List.take n
+       $ map fst
+       $ List.sortOn (Down . snd)
+       $ mapMaybe
+           (\p -> do
+               h <- HMap.lookup p reverses
+               pure (p, HMap.size (snd h))
+           )
+       $ directDeps
+
+directDependencies :: PackageName -> Reverses -> [PackageName]
+directDependencies package reverses = id
+  $ HMap.keys
+  $ maybe (error (show package ++ ": package doesn't exist")) snd
+  $ HMap.lookup package
+  $ reverses
+
 findPkg :: PackageName -> [PackageSource] -> Maybe PackageSource
 findPkg name = List.find $ \case
   HackageGet{..} -> package == name
@@ -135,11 +162,13 @@ cmdParser = O.subparser
     , O.command "matrix" (O.info (O.helper <*> matrix) matrixInfo)
     , O.command "realise" (O.info (O.helper <*> realise) realiseInfo)
     , O.command "realize" (O.info (O.helper <*> realise) realiseInfo)
+    , O.command "top" (O.info (O.helper <*> top) topInfo)
     ]
   where
     downloadInfo = O.fullDesc
     matrixInfo = O.fullDesc
     realiseInfo = O.fullDesc
+    topInfo = O.fullDesc
 
     download = DownloadPackageIndex
       <$> ( O.strOption
@@ -187,12 +216,6 @@ cmdParser = O.subparser
               , O.metavar "FILEPATH"
               ]
           )
-      <*> ( O.switch
-            $ mconcat
-            $ [ O.long "prettify"
-              , O.help "prettify output"
-              ]
-          )
       <*> ( O.strOption
             $ mconcat
             $ [ O.long "overrides"
@@ -218,10 +241,29 @@ cmdParser = O.subparser
               , O.metavar "FILEPATH"
               ]
           )
-      <*> ( O.switch
+
+    top = Top
+      <$> ( O.strOption
             $ mconcat
-            $ [ O.long "prettify"
-              , O.help "prettify output"
+            $ [ O.long "index"
+              , O.short 'i'
+              , O.help "location of package index"
+              , O.metavar "FILEPATH"
+              ]
+          )
+      <*> ( O.strOption
+            $ mconcat
+            $ [ O.long "pkg"
+              , O.short 'p'
+              , O.help "name of package"
+              , O.metavar "PACKAGE NAME"
+              ]
+          )
+      <*> ( O.option O.auto
+            $ mconcat
+            $ [ O.short 'n'
+              , O.help "Get top N most depended on immediate reverse dependencies"
+              , O.metavar "INT"
               ]
           )
 
@@ -240,8 +282,8 @@ data Command
     --
     --   download the package index and serialise it to
     --   @targetFile@ as binary
-  | GenerateBuildMatrix FilePath PackageName (Maybe [PatchFile]) [PackageName] FilePath Bool FilePath
-    -- ^ (packageIndex, package, patches, excludedPackages, output, prettifyOutput, overrides)
+  | GenerateBuildMatrix FilePath PackageName (Maybe [PatchFile]) [PackageName] FilePath FilePath
+    -- ^ (packageIndex, package, patches, excludedPackages, output, overrides)
     --
     --   construct a build matrix of the reverse dependencies
     --   of @package@ (excluding @excludedPackages@), from
@@ -249,15 +291,18 @@ data Command
     --   @package@, if any. @overrides@ will be applied to
     --   the reverse dependencies.
     --
-    --   serialise the build matrix to @output@, prettifying it
-    --   if @prettifyOutput@ is set.
-  | RealiseBuildMatrix FilePath FilePath Bool
-    -- ^ (matrixJson, output, prettifyOutput)
+    --   serialise the build matrix to @output@.
+  | RealiseBuildMatrix FilePath FilePath
+    -- ^ (matrixJson, output)
     --
     --   run the build matrix described by @matrixJson@,
-    --   and dump the build report to @output@, prettifying it
-    --   if @prettifyOutput@ is set.
+    --   and dump the build report to @output@.
     --
+  | Top FilePath PackageName Int
+    -- ^ (packageIndex, package, n)
+    --
+    --   Return a list of the top N most depended on immediate reverse
+    --   dependencies of the package.
 
 data BuildMatrix = BuildMatrix
   { packageSrc :: PackageSource
@@ -335,7 +380,7 @@ fetchGz :: String
 fetchGz url outFile mtmpDir fromFile = do
   req <- do
     req0 <- parseUrlThrow url
-    pure (req0 { responseTimeout = responseTimeoutMicro 300_000 })
+    pure (req0 { responseTimeout = responseTimeoutMicro 3_000_000 })
   m <- getGlobalManager
 
   let sink = case mtmpDir of
@@ -410,6 +455,7 @@ fetchSource = \case
     o1@(e1, _, _) <- liftIO $ withCurrentDirectory srcDir0 $ do
       readProcess $ proc "git" $ ["checkout"] ++
         maybeToList rev
+    liftIO $ print o1
     when (e1 /= ExitSuccess) $ throwError o1
     let srcDir1 = maybe srcDir0 (srcDir0 </>) subPath
     version <- (liftEither =<<) $ liftIO $ withCurrentDirectory srcDir1 $ do
