@@ -31,11 +31,15 @@ data Command
     --   @package@, sorted by number of reverse dependencies.
     --
     --   serialise the build matrix to @output@.
-  | RealiseBuildMatrix Bool FilePath FilePath
-    -- ^ (dontCheck, matrixJson, output)
+  | RealiseBuildMatrix Bool FilePath FilePath (Maybe FilePath)
+    -- ^ (dontCheck, matrixJson, output, overrides)
     --
     --   run the build matrix described by @matrixJson@,
     --   and dump the build report to @output@.
+    --
+    --   @overrides@ are considered special when fetching;
+    --   if any overrides fail to be fetched, then `realise`
+    --   will terminate.
     --
     --   @dontCheck@ determines whether or not to run tests.
     --   by default, it is 'False'.
@@ -138,6 +142,7 @@ cmdParser = O.subparser
               , O.metavar "FILEPATH"
               ]
           )
+      <*> overrides
 
     top = Top
       <$> ( O.strOption

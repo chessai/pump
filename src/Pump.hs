@@ -25,8 +25,6 @@ import System.IO.Temp (getCanonicalTemporaryDirectory, withTempDirectory)
 import System.Process.Typed
 import Data.String.Conversions (cs)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encode.Pretty as Aeson
-import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HMap
 import qualified Data.List as List
 import qualified Data.ByteString.Streaming as SB
@@ -54,9 +52,10 @@ doCommand = \case
     let matrix = generateBuildMatrix newest package patches excludedPackages overrides n
     serialiseToFile outFile matrix
 
-  RealiseBuildMatrix dontCheck matrixJson outFile -> do
+  RealiseBuildMatrix dontCheck matrixJson outFile overridesPath -> do
     BuildMatrix{..} <- loadBuildMatrix matrixJson
-    build outFile dontCheck packageSrc dependencies
+    overrides <- loadOverrides overridesPath
+    build outFile dontCheck packageSrc dependencies overrides
 
   Top packageIndex package n -> do
     newest <- decodeFile @Newest packageIndex
@@ -168,34 +167,14 @@ findPkg name = List.find $ \case
 main :: IO ()
 main = doCommand =<< parseCommand
 
-streamSep :: Monad m => B.ByteString -> Stream (Of B.ByteString) m r -> Stream (Of B.ByteString) m r
-streamSep sep = go
-  where
-    go s0 = do
-      e <- lift (S.next s0)
-      case e of
-        Left r -> do
-          pure r
-        Right (a, rest) -> do
-          S.yield a
-          prependToAll rest
-    prependToAll s = do
-      e <- lift (S.next s)
-      case e of
-        Left r -> do
-          pure r
-        Right (a, rest) -> do
-          S.yield sep
-          S.yield a
-          prependToAll rest
-
 build :: ()
   => FilePath
   -> Bool
   -> PackageSource
   -> [PackageSource]
+  -> [PackageSource]
   -> IO ()
-build outFile' _dontCheck pkg deps = do
+build outFile' _dontCheck pkg deps overrides = do
   outFile <- do
     if isAbsolute outFile'
       then pure outFile'
@@ -228,6 +207,13 @@ build outFile' _dontCheck pkg deps = do
                         , ..
                         }
                   S.yield report
+                  let pkgName = sourcePackage src
+                  when (isJust (findPkg pkgName overrides)) $ do
+                    let err = concat
+                          [ "Failed to fetch ", (unPackageName pkgName), ". "
+                          , "stderr was: ", cs stderr
+                          ]
+                    fail err
                 Right (p, v) -> do
                   liftIO $ createCabalProject p srcDir
 
@@ -286,4 +272,25 @@ createCabalProject depFile srcDir
 
 serialiseToFile :: ToJSON a => FilePath -> a -> IO ()
 serialiseToFile path a =
-  BL.writeFile path (Aeson.encodePretty a)
+  Yaml.encodeFile path a
+
+streamSep :: Monad m => B.ByteString -> Stream (Of B.ByteString) m r -> Stream (Of B.ByteString) m r
+streamSep sep = go
+  where
+    go s0 = do
+      e <- lift (S.next s0)
+      case e of
+        Left r -> do
+          pure r
+        Right (a, rest) -> do
+          S.yield a
+          prependToAll rest
+    prependToAll s = do
+      e <- lift (S.next s)
+      case e of
+        Left r -> do
+          pure r
+        Right (a, rest) -> do
+          S.yield sep
+          S.yield a
+          prependToAll rest
