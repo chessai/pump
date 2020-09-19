@@ -10,20 +10,20 @@ module FileSystem
 
 import Control.Monad
 import Data.Foldable (for_)
-import Data.Text (Text)
+import Data.ByteString (ByteString)
 import System.Directory (createDirectoryIfMissing, withCurrentDirectory, listDirectory, doesFileExist)
 
-import qualified Data.Text.IO as TIO
+import qualified Data.ByteString as B
 
 data FileSystem
-  = File FilePath Text
+  = File FilePath ByteString
   | Dir FilePath [FileSystem]
   deriving stock (Eq, Show)
 
 writeFs :: FileSystem -> IO ()
 writeFs = \case
   File name content -> do
-    TIO.writeFile name content
+    B.writeFile name content
   Dir name children -> do
     createDirectoryIfMissing False name
     withCurrentDirectory name $ for_ children writeFs
@@ -38,7 +38,7 @@ readFsFilter p sourceDir = withCurrentDirectory sourceDir $ do
     isFile <- doesFileExist name
     if isFile
       then do
-        contents <- TIO.readFile name
+        contents <- B.readFile name
         pure [File name contents]
       else do
         fs <- readFs name
