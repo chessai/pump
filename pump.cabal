@@ -64,6 +64,7 @@ library
     , transformers
     , typed-process
     , unordered-containers
+    , yaml
   hs-source-dirs:
     src
   default-language:

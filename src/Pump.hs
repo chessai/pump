@@ -35,6 +35,7 @@ import qualified Streaming.Prelude as S
 import qualified Streaming as S
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC8
+import qualified Data.Yaml as Yaml
 import Control.Monad.Trans.Class (lift)
 
 import Commands
@@ -68,15 +69,11 @@ loadOverrides = \case
   Nothing -> do
     pure []
   Just path -> do
-    fromMaybe (error "Failed to decode package overrides.")
-      <$> Aeson.decodeFileStrict' @[PackageSource] path
+    Yaml.decodeFileThrow @_ @[PackageSource] path
 
 loadBuildMatrix :: FilePath -> IO BuildMatrix
 loadBuildMatrix path = do
-  fromMaybe err <$> Aeson.decodeFileStrict' @BuildMatrix path
-  where
-    err = error
-      ("failed to decode build matrix from " ++ path)
+  Yaml.decodeFileThrow @_ @BuildMatrix path
 
 downloadPackageIndex :: ()
   => FilePath
