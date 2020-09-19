@@ -8,33 +8,33 @@
 
 module Pump (main) where
 
-import System.FilePath (isAbsolute, (</>))
 import Control.Monad
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Resource (runResourceT)
 import Data.Aeson (ToJSON(..))
 import Data.Binary (encodeFile, decodeFile)
 import Data.Maybe
-import Streaming (Stream, Of(..))
 import Data.Ord (Down(..))
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Trans.Resource (runResourceT)
+import Data.String.Conversions (cs)
 import Distribution.Package (PackageName, unPackageName)
 import Distribution.Version (Version, nullVersion, withinRange)
 import PackDeps (Newest(..), PackInfo(..), Reverses, getReverses)
+import Streaming (Stream, Of(..))
 import System.Directory (withCurrentDirectory, getCurrentDirectory, makeAbsolute, removeDirectoryRecursive)
+import System.FilePath (isAbsolute, (</>))
 import System.IO.Temp (getCanonicalTemporaryDirectory, withTempDirectory)
 import System.Process.Typed
-import Data.String.Conversions (cs)
 import qualified Data.Aeson as Aeson
-import qualified Data.HashMap.Strict as HMap
-import qualified Data.List as List
-import qualified Data.ByteString.Streaming as SB
-import qualified Data.ByteString.Streaming.Char8 as SBC8
-import qualified Streaming.Prelude as S
-import qualified Streaming as S
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC8
+import qualified Data.ByteString.Streaming as SB
+import qualified Data.ByteString.Streaming.Char8 as SBC8
+import qualified Data.HashMap.Strict as HMap
+import qualified Data.List as List
 import qualified Data.Yaml as Yaml
-import Control.Monad.Trans.Class (lift)
+import qualified Streaming as S
+import qualified Streaming.Prelude as S
 
 import Commands
 import Fetch
