@@ -30,8 +30,12 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HMap
 import qualified Data.List as List
 import qualified Data.ByteString.Streaming as SB
+import qualified Data.ByteString.Streaming.Char8 as SBC8
 import qualified Streaming.Prelude as S
 import qualified Streaming as S
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BC8
+import Control.Monad.Trans.Class (lift)
 
 import Commands
 import Fetch
@@ -167,6 +171,27 @@ findPkg name = List.find $ \case
 main :: IO ()
 main = doCommand =<< parseCommand
 
+streamSep :: Monad m => B.ByteString -> Stream (Of B.ByteString) m r -> Stream (Of B.ByteString) m r
+streamSep sep = go
+  where
+    go s0 = do
+      e <- lift (S.next s0)
+      case e of
+        Left r -> do
+          pure r
+        Right (a, rest) -> do
+          S.yield a
+          prependToAll rest
+    prependToAll s = do
+      e <- lift (S.next s)
+      case e of
+        Left r -> do
+          pure r
+        Right (a, rest) -> do
+          S.yield sep
+          S.yield a
+          prependToAll rest
+
 build :: ()
   => FilePath
   -> Bool
@@ -189,7 +214,10 @@ build outFile' _dontCheck pkg deps = do
 
     runResourceT
       $ SB.writeFile outFile
+      $ flip SBC8.snoc ']'
+      $ SBC8.cons '['
       $ SB.fromChunks
+      $ streamSep (BC8.singleton ',')
       $ S.map (cs . Aeson.encode)
       $ mapStreamM
           (\src -> do
