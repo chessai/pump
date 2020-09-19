@@ -22,6 +22,7 @@ import Distribution.Version (Version, nullVersion, withinRange)
 import PackDeps (Newest(..), PackInfo(..), Reverses, getReverses)
 import Streaming (Stream, Of(..))
 import System.Directory (withCurrentDirectory, getCurrentDirectory, makeAbsolute, removeDirectoryRecursive)
+import System.Exit (ExitCode(..))
 import System.FilePath (isAbsolute, (</>))
 import System.IO.Temp (getCanonicalTemporaryDirectory, withTempDirectory)
 import System.Process.Typed
@@ -209,9 +210,10 @@ build outFile' _dontCheck pkg deps overrides = do
                   S.yield report
                   let pkgName = sourcePackage src
                   when (isJust (findPkg pkgName overrides)) $ do
-                    let err = concat
-                          [ "Failed to fetch ", (unPackageName pkgName), ". "
-                          , "stderr was: ", cs stderr
+                    let err = unlines
+                          [ "Failed to fetch " ++ unPackageName pkgName ++ "."
+                          , "  exit code: " ++ show (exitCodeToInt exitCode)
+                          , "  stderr was: " ++ cs stderr
                           ]
                     fail err
                 Right (p, v) -> do
@@ -294,3 +296,8 @@ streamSep sep = go
           S.yield sep
           S.yield a
           prependToAll rest
+
+exitCodeToInt :: ExitCode -> Int
+exitCodeToInt = \case
+  ExitSuccess -> 0
+  ExitFailure i -> i
