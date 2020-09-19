@@ -95,7 +95,6 @@ fetchSource = \case
     o1@(e1, _, _) <- liftIO $ withCurrentDirectory srcDir0 $ do
       readProcess $ proc "git" $ ["checkout"] ++
         maybeToList rev
-    liftIO $ print o1
     when (e1 /= ExitSuccess) $ throwError o1
     let srcDir1 = maybe srcDir0 (srcDir0 </>) subPath
     version <- (liftEither =<<) $ liftIO $ withCurrentDirectory srcDir1 $ do
