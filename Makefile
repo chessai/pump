@@ -7,6 +7,9 @@ build:
 clean:
 	cabal clean
 
+ghci:
+	cabal repl
+
 ghcid:
 	ghcid -c "cabal repl"
 
